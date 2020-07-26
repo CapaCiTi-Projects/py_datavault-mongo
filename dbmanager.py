@@ -1,9 +1,13 @@
+from bson.codec_options import CodecOptions
+from pymongo import MongoClient
+
 import mysql.connector
 import mysql.connector.errors
 import numpy as np
 import pandas as pd
 import tkinter.messagebox as tkMessageBox
 import tkinter.simpledialog as tkSimpleDialog
+import urllib.parse
 
 
 class DBColumn(object):
@@ -38,7 +42,108 @@ class DBColumn(object):
         return self.name
 
 
-class DBManager(object):
+class DBManager:
+    _config = {}
+    _tables = {}
+    _data_store = {}
+
+    def __init__(self, tables=None, **conf):
+        if tables is not None:
+            self._tables = tables
+
+        for key in conf:
+            self.updateconfig_safe(key, conf[key])
+
+    def open_connection(self):
+        pass
+
+    def get_table(self, tablename, cols_as_dict=False):
+        for t in self._tables:
+            if t["table"] == tablename:
+                out = t.copy()
+                out["fields"] = self.get_table_cols_dict(t)
+                return out
+        return None
+
+    def does_table_exist(self, tablename):
+        return self.get_table(tablename) is not None
+
+    def get_table_cols(self, tablename):
+        columns = [tuple(map(lambda x: x.get_name(), t["fields"]))
+                   for t in self._tables if t["table"] == tablename]
+
+        assert(len(columns) > 0),\
+            f"`{tablename}` does not exist in known tables."
+        return columns[0]
+
+    def get_table_cols_full(self, table):
+        if isinstance(table, str):
+            columns = list(t["fields"]
+                           for t in self._tables if t["table"] == table)
+
+            assert(len(columns) > 0),\
+                f"{table} is not a known table, please pass `{table}` directly or add it to the `tables` dictionary."
+        elif isinstance(table, dict):
+            columns = table["fields"]
+        else:
+            raise TypeError(
+                "`table` parameter expects string or dictionary as type."
+            )
+
+        return columns
+
+    def get_table_cols_dict(self, table):
+        t = self.get_table_cols_full(table)
+        return {col.get_name(): col for col in t}
+
+    def updateconfig_safe(self, key, data):
+        if key in self._config:
+            self._config[key] = data
+
+    def updateconfig(self, key, data):
+        if key in self._config:
+            self._config[key] = data
+        else:
+            raise KeyError(f"{key} does not exist in `tables`.")
+
+    def getconfig(self, key):
+        if key in self._config:
+            return self._config[key]
+        raise KeyError(f"{key} does not exist in `config`")
+
+    def isconfigset(self, key):
+        if key not in self._config:
+            return False
+
+        config = self._config[key]
+        if isinstance(config, str) and config:
+            return True
+        elif isinstance(config, (list, dict)) and len(config) > 0:
+            return True
+        elif config is not None:
+            return True
+        return False
+
+    @staticmethod
+    def store_data(key, data, allow_overwrite=True):
+        if allow_overwrite:
+            DBManager._data_store[key] = data
+        else:
+            if key not in DBManager._data_store:
+                DBManager._data_store[key] = data
+
+    @staticmethod
+    def retrieve_data(key):
+        if key in DBManager._data_store:
+            return DBManager._data_store[key]
+        raise KeyError(f"{key} does not exist in `data store`")
+
+    @staticmethod
+    def isdataset(key):
+        return key in DBManager._data_store
+
+
+class MySQLManager(DBManager):
     _config = {
         "host": "localhost",
         "user": "root",
@@ -81,42 +186,39 @@ class DBManager(object):
                          allow_nulls=False, auto_increment=True),
                 DBColumn("title", allow_nulls=False)
             )
+        },
+        {
+            "table": "product_sales",
+            "primary": "id_sale",
+            "foreign": (
+                "id_product",
+                "products(id_product)"
+            ),
+            "fields": (
+                DBColumn("id_sale", dtype="INT",
+                         allow_nulls=False, auto_increment=True),
+                DBColumn("id_product", dtype="INT", allow_nulls=False),
+                DBColumn("period", dtype="DATE", allow_nulls=False),
+                DBColumn("sold", dtype="INT", allow_nulls=False)
+            )
         }
     ]
 
-    # Used for storing data, accessible via `store_data` & `retrieve_data`.
-    _data_store = {}
+    def __init__(self, tables=None, **conf):
+        super().__init__(tables, **conf)
+        self.setup_db()
 
-    @staticmethod
-    def init(data=None, tables=None, **conf):
-        """Initialise the DbManager data dictionaries, ie '_data', '_conf' & '_tables'."""
-        for key in data:
-            DBManager.store_data(key, data[key])
-
-        if tables is not None:
-            DBManager._tables = tables
-
-        for key in conf:
-            DBManager.updateconfig_safe(key, conf[key])
-
-        DBManager.setup_db()
-
-    @staticmethod
-    def open_connection(ignore_db=False):
-        """Open a connection to the database using the data store in DBManager._config.
-        Retrieve using the static method, getconfig()."""
+    def open_connection(self, ignore_db=False):
+        if self.isconfigset("passwd"):
+            passwd = self.getconfig("passwd")
+        if self.isconfigset("db") and not ignore_db:
+            db = self.getconfig("db")
 
         connect_args = {}
-        connect_args["host"] = DBManager.getconfig("host")
-        connect_args["user"] = DBManager.getconfig("user")
-
-        passwd = ""
-        if DBManager.isconfigset("passwd"):
-            passwd = DBManager.getconfig("passwd")
+        connect_args["host"] = self.getconfig("host")
+        connect_args["user"] = self.getconfig("user")
         connect_args["passwd"] = passwd
-
-        if DBManager.isconfigset("db") and not ignore_db:
-            connect_args["database"] = DBManager.getconfig("db")
+        connect_args["database"] = db
 
         try:
             con = mysql.connector.connect(**connect_args)
@@ -124,20 +226,16 @@ class DBManager(object):
             tkMessageBox.showerror(title="Connection Failed",
                                    message="Couldn't connect to the MySQL server, please check if it is running and available.")
             return
-
         return con
 
-    @staticmethod
-    def setup_db():
-        """Setup the DataBase by creating all of the tables stored in the `_tables` dict."""
-        if (not DBManager.isconfigset("db")) or (not DBManager._tables):
+    def setup_db(self):
+        if (not self.isconfigset("db")) and (not self._tables):
             return
 
-        with DBManager.open_connection() as con:
+        with self.open_connection() as con:
             cursor = con.cursor(prepared=True)
 
-            # Create all of the tables.
-            for table in DBManager._tables:
+            for table in self._tables:
                 sql_createtable = f"""CREATE TABLE IF NOT EXISTS `{table["table"]}` (
                     {",".join(str(field) for field in table["fields"])},
                     PRIMARY KEY ({table["primary"]})
@@ -145,8 +243,7 @@ class DBManager(object):
 
                 cursor.execute(sql_createtable)
 
-            # Add foreign keys to the tables.
-            for table in DBManager._tables:
+            for table in self._tables:
                 if "foreign" not in table:
                     continue
 
@@ -157,203 +254,180 @@ class DBManager(object):
 
                 cursor.execute(sql_alter)
 
-    @staticmethod
-    def get_table(tablename, cols_as_dict=False):
-        for t in DBManager._tables:
-            if t["table"] == tablename:
-                out = t.copy()
-                out["fields"] = DBManager.get_table_cols_dict(t)
-                return out
-        return None
+    def select(self, tablename: str = "", columns: list = [], where: dict = {}, groupby: str = "", order: str = "", limit: int = 5):
+        with self.open_connection() as con:
+            cursor = con.cursor()
+            cols = ",".join(columns)
+            where_clause = " AND ".join([f"{k} = {where[k]}" for k in where])
 
-    @staticmethod
-    def does_table_exist(tablename):
-        return DBManager.get_table(tablename) is not None
+            stmt=""
+            stmt += f"SELECT {cols}" + "\n"
+            stmt += f"FROM {tablename}" + "\n"
+            if len(where) > 0:
+                stmt += f"WHERE {where_clause}" + "\n"
+            if groupby:
+                stmt += f"GROUP BY {groupby}" + "\n"
+            if order:
+                stmt += f"ORDER BY {order}" + "\n"
+            stmt += f"LIMIT {limit}" + "\n"
 
-    @staticmethod
-    def get_table_cols(tablename):
-        """Get a tuple with the names of all of the columns in the specified table."""
-        columns = [tuple(map(lambda x: x.get_name(), t["fields"]))
-                   for t in DBManager._tables if t["table"] == tablename]
+            cursor.execute(stmt)
+            return cursor.fetchall()
 
-        assert(len(columns) >
-               0), f"`{tablename}` does not exist in known tables."
-        return columns[0]
+    def get_dbdata(self, table: str = None) -> pd.DataFrame:
+        if self.isconfigset("table"):
+            tablename=self.getconfig("table")
+        tablename=table or tablename
 
-    @staticmethod
-    def get_table_cols_full(table):
-        """Get the full `DBColumn` tuple at table."""
-        if isinstance(table, str):
-            columns = list(t["fields"]
-                           for t in DBManager._tables if t["table"] == table)
-
-            assert(len(columns) >
-                   0), f"`{table}` is not a known table, please pass `{table}` directly or add it to the `tables` dictionary."
-        elif isinstance(table, dict):
-            columns = table["fields"]
-        else:
-            raise TypeError(
-                "`table` parameter expects string or dictionary as type.")
-
-        return columns
-
-    @staticmethod
-    def get_table_cols_dict(table):
-        t = DBManager.get_table_cols_full(table)
-        return {col.get_name(): col for col in t}
-
-    @staticmethod
-    def updateconfig_safe(key, data):
-        """This method is the same as updateconf(), but is considered safe as
-        it doesn't overwrite any config data if it already has a value."""
-        if key in DBManager._config:
-            if not DBManager.isconfigset(key):
-                DBManager._config[key] = data
-        else:
-            raise KeyError(f"{key} does not exists in DBManager.tables")
-
-    @ staticmethod
-    def updateconfig(key, data):
-        """Update data in the `_conf` dictionary"""
-        if key in DBManager._config:
-            DBManager._config[key] = data
-            raise KeyError(f"{key} does not exist in `tables`")
-
-    @ staticmethod
-    def getconfig(key):
-        """Get the data at key in the `_conf` dict"""
-        if key in DBManager._config:
-            return DBManager._config[key]
-        raise KeyError(f"{key} does not exist in `config`")
-
-    @ staticmethod
-    def isconfigset(key):
-        """Check to see if key exists in _conf and if a value is set."""
-        return (key in DBManager._config) and (DBManager._config[key])
-
-    @ staticmethod
-    def store_data(key, data, allow_overwrite=True):
-        """Method to store data in the `_data` dict. Can be used for any data."""
-        if allow_overwrite:
-            DBManager._data_store[key] = data
-        else:
-            if key not in DBManager._data_store:
-                DBManager._data_store[key] = data
-
-    @ staticmethod
-    def retrieve_data(key):
-        """Method to retrieve data from the `_data` dict using key."""
-        if key in DBManager._data_store:
-            return DBManager._data_store[key]
-        raise KeyError(f"{key} does not exist in `data store`")
-
-    @staticmethod
-    def isdataset(key):
-        return key in DBManager._data_store
-
-    @staticmethod
-    def add_to_table(table, *data):
-        pass
-
-    @staticmethod
-    def get_dbdata(table: str = None) -> pd.DataFrame:
-        """ Method to get the data from the database and return it as a tuple consisting
-        of a list of the names of the columns and a list of the actualy data in tuple format."""
-        if DBManager.isconfigset("table"):
-            tablename = DBManager.getconfig("table")
-        tablename = table or tablename
-
-        if not DBManager.does_table_exist(tablename):
+        if not self.does_table_exist(tablename):
             return
 
-        with DBManager.open_connection() as con:
-            cursor = con.cursor()
+        data=[]
+        with self.open_connection() as con:
+            cursor=con.cursor()
+            cols=self.get_table_cols(tablename)
 
-            cols = DBManager.get_table_cols(tablename)
+            cursor.execute(f"""
+                SELECT {",".join(cols)} FROM {tablename}
+            """)
+            data=cursor.fetchall()
 
-            cursor.execute(
-                f"SELECT {','.join(cols)} FROM {tablename}")
-            data = cursor.fetchall()
-
-        data_df = pd.DataFrame(data, columns=cols)
-
+        data_df=pd.DataFrame(data, columns = cols)
         return data_df
 
-    @staticmethod
-    def add_df_to_db(df, table: str = "", suppress=""):
-        if (not table) and (not DBManager.isconfigset("table")):
+    def add_df_to_db(self, df, table: str = "", suppress: str = ""):
+        if (not table) and (not self.isconfigset("table")):
             raise LookupError(
-                "There is no table specified to use for CRUD operations.")
+                "There is no table available for CRUD operations."
+            )
         else:
-            db_table = table if table else DBManager.getconfig("table")
+            db_table=table if table else self.getconfig("table")
 
-        if not DBManager.does_table_exist(db_table):
+        if not self.does_table_exist(db_table):
             raise LookupError(
-                "The specified table is not specified in `table` dict or does not exist.")
+                "The specified table is not specified in the `table` dict or does not exist."
+            )
 
-        with DBManager.open_connection() as con:
-            cursor = con.cursor()
+        with self.open_connection() as con:
+            cursor=con.cursor()
 
-            # Firstly, get original dataframe, using get_db_data()
-            left_df = DBManager.get_dbdata(table=db_table)
+            left_df=self.get_dbdata(table = db_table)
+            out_df=left_df.merge(df, how = "outer", indicator = "shared")
 
-            # Then, compare the the two and only take the ones that have differences
-            out_df = left_df.merge(df, how="outer", indicator="shared")
+            df_insert=out_df.loc[out_df.loc["shared"] == "right_only"].copy()
+            df_delete=out_df.loc[out_df.loc["shared"] == "left_only"].copy()
 
-            df_insert = out_df[out_df["shared"] == "right_only"].copy()
-            df_delete = out_df[out_df["shared"] == "left_only"].copy()
-
-            out_df = out_df.drop(["shared"], axis=1)
-            df_insert = df_insert.drop(["shared"], axis=1)
-            df_delete = df_delete.drop(["shared"], axis=1)
+            out_df=out_df.drop(columns = ["shared"])
+            df_insert=df_insert.drop(columns = ["shared"])
+            df_delete=df_insert.drop(columns = ["shared"])
 
             if len(out_df) == 0:
-                tkMessageBox.showinfo(title="DataBase Update Complete",
-                                      message="Nothing was added to the DB as no changes were detected between the different datasets.")
+                tkMessageBox.showinfo(title = "DataBase Update Complete",
+                                      message = "Nothing was added to the DB as no changes were detected between the different datasets.")
                 return
 
-            current_table = DBManager.get_table(db_table, cols_as_dict=True)
-            table_cols = current_table["fields"]
-            table_pk = current_table["primary"]
+            current_table=self.get_table(db_table, cols_as_dict = True)
+            table_cols=current_table["fields"]
+            table_pk=current_table["primary"]
 
-            cols_insert = "`,`".join([str(i)
+            cols_insert="`,`".join([str(i)
                                       for i in df_insert.columns.tolist()])
-            sql_delete = f"DELETE FROM `{db_table}` WHERE {table_pk}=%s"
+            sql_delete=f"""
+                DELETE FROM `{db_table}` WHERE {table_pk}=%s
+            """
 
-            # try:
             if len(df_insert) > 0:
                 for _, row in df_insert.iterrows():
                     for index, value in row.iteritems():
                         if pd.isna(value) and table_cols[index].can_self_generate():
-                            row = row.drop(index=[index])
+                            row=row.drop(index = [index])
                             continue
                         if type(value) == np.int64:
-                            row.loc[index] = int(value)
-                    # if not row.loc[table_pk] or pd.isna(row.loc[table_pk]):
-                    #     row = row.drop(index=[table_pk])
-                    # print(row)
+                            row.loc[index]=int(value)
 
-                    cols_insert = "`,`".join([str(i)
+                    cols_insert="`,`".join([str(i)
                                               for i in row.index.tolist()])
+                    sql_insert=f"""
+                        INSERT INTO `{db_table}` (`{cols_insert}`)
+                        VALUES ({"%s," * (len(row.index)-1)}%s)
+                    """
 
-                    sql_insert = (f"INSERT INTO `{db_table}` (`" + cols_insert +
-                                  "`) VALUES (" + "%s," * (len(row.index)-1) + "%s)")
-                    print(tuple(row))
                     cursor.execute(sql_insert, tuple(row))
             if len(df_delete) > 0:
+                # data_delete = df_delete.to_dict(orient="records")
+                # cursor.executemany(sql_delete, data_delete)
                 cursor.executemany(sql_delete, df_delete)
-            con.commit()
 
-            if (suppress == "success") or (suppress == "all"):
-                tkMessageBox.showinfo(title="Save Successful",
-                                      message="Save Completed Successfully!")
-            # except Exception as err:
-            #     con.rollback()
+            try:
+                con.commit()
 
-            #     if (suppress == "error") or (suppress == "all"):
-            #         tkMessageBox.showerror(title="Save Failed",
-            #                                message=f"The data was not saved to the DB.\n{err}")
+                if (suppress == "success") or (suppress == "all"):
+                    tkMessageBox.showinfo(title = "Save Successful",
+                                          message = "Save Completed Successfully!")
+            except mysql.connector.ProgrammingError:
+                con.rollback()
+
+                if (suppress == "error") or (suppress == "all"):
+                    tkMessageBox.showinfo(title = "Save Failed",
+                                          message = "There was a problem with the supplied SQL statement.")
+            except Exception as err:
+                con.rollback()
+
+                if (suppress == "error") or (suppress == "all"):
+                    tkMessageBox.showinfo(title = "Save Successful",
+                                          message = err)
+
+
+class MongoManager(DBManager):
+    _config={
+        "host": "",
+        "user": "",
+        "passwd": "",
+        "db": "",
+        "codec_options": None
+    }
+
+    def __init__(self, tables=None, **conf):
+        super().__init__(tables=tables, **conf)
+
+    def open_connection(self):
+        """Open a connection to the database using the data store in DBManager._config.
+        Retrieve using the static method, getconfig()."""
+
+        # pword = urllib.parse.quote("GWSgnYU4pu7zs2S")
+        # dbname = urllib.parse.quote("DataTracker")
+        # con = MongoClient(
+        #     f"mongodb+srv://admin08345:{pword}@cluster0.xjgrr.mongodb.net/{dbname}?retryWrites=true&w=majority")
+        try:
+            host = urllib.parse.quote(self.getconfig("host"))
+            user = urllib.parse.quote(self.getconfig("user"))
+            dbname = urllib.parse.quote(self.getconfig("db"))
+            passwd = urllib.parse.quote(self.getconfig("passwd"))
+        except KeyError:
+            raise ValueError(
+                "Please Ensure that all of the configuration settings needed to open a connection are available."
+                "These required options are: `host`, `user`, `dbname`, `passwd`.")
+
+        # try:
+        con=MongoClient(
+            f"mongodb+srv://{user}:{passwd}@{host}/{dbname}?retryWrites=true&w=majority")
+        # except :
+        #     tkMessageBox.showerror(title="Connection Failed",
+        #                            message="Couldn't connect to the MySQL server, please check if it is running and available.")
+        #     return
+
+        return con
+
+    def get_database(self, db=None):
+        if db == None:
+            db = self.getconfig("db")
+
+        with self.open_connection() as client:
+            if self.isconfigset("codec_options"):
+                codec_options = self.getconfig("codec_options")
+                return client.get_database(db, codec_options=codec_options)
+            return client.get_database(db)
 
 
 if __name__ == "__main__":
-    import test
+    pass
