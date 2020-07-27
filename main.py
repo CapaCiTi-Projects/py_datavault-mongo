@@ -35,7 +35,7 @@ class DateCodec(TypeCodec):
         return value.strftime("%Y-%m-%dT%H:%M:%S.%f%z")
 
     def transform_bson(self, value):
-        return dtime.datetime.strptime("%Y-%m-%dT%H:%M:%S.%f%z")
+        return dtime.datetime.strptime("%Y-%m-%dT%H:%M:%S.%f%z").date()
 
 
 def setup():
@@ -163,6 +163,11 @@ def create_top_3():
     ])
 
     data_top3 = list(top3)
+    pos = 0
+    for item in data_top3:
+        item["position"] = pos
+        pos += 1
+    del pos
 
     coll_top_products = db_datatracker["top_products"]
     coll_top_products.drop()
@@ -189,8 +194,10 @@ def drop_brands():
     for item in data_top_products:
         if drop_count >= 2:
             break
-        res_delete = coll_top_products.update_one(
+        res_update = coll_top_products.update_one(
             {"_id": item["_id"]}, {"$unset": {"brand": ""}})
+        if res_update.matched_count >= 1:
+            drop_count += 1
     return 1, "Brands were Successfully Dropped and Stored."
 
 
@@ -199,11 +206,16 @@ def update_product():
 
     db_datatracker = mongo.get_database()
     coll_top_products = db_datatracker["top_products"]
+    coll_products = db_datatracker["products"]
 
     res_update = coll_top_products.find_one_and_update(
-        {}, {"$inc": {"totalSales": 250}})
+        {}, {"$inc": {"totalSales": 250}, "$set": {"brand": "Shield"}})
 
-    return 1, "Succesfully incremented field `totalSales` from 1 document in the `top_products` collection."
+    if res_update is None:
+        return 0, "No products updated as no products with brands were found."
+
+    # coll_products.find_one_and_update(res_update, {"brand": "Orange Juice"})
+    return 1, "Succesfully update 1 document in the `top_products` collection."
 
 
 def create_worst_5_brands():
@@ -216,7 +228,7 @@ def create_worst_5_brands():
         {"$match": {"sales.0": {"$exists": True}, "brand": {"$exists": True}}},
         {"$unwind": "$sales"},
         {"$group": {"_id": "$brand", "totalSales": {"$sum": "$sales.sold"}}},
-        {"$sort": {"totalSales": 1}},
+        {"$sort": {"totalSales": 1, "brand": 1}},
         {"$limit": 5}
     ])
 
