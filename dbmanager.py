@@ -260,7 +260,7 @@ class MySQLManager(DBManager):
             cols = ",".join(columns)
             where_clause = " AND ".join([f"{k} = {where[k]}" for k in where])
 
-            stmt=""
+            stmt = ""
             stmt += f"SELECT {cols}" + "\n"
             stmt += f"FROM {tablename}" + "\n"
             if len(where) > 0:
@@ -276,23 +276,23 @@ class MySQLManager(DBManager):
 
     def get_dbdata(self, table: str = None) -> pd.DataFrame:
         if self.isconfigset("table"):
-            tablename=self.getconfig("table")
-        tablename=table or tablename
+            tablename = self.getconfig("table")
+        tablename = table or tablename
 
         if not self.does_table_exist(tablename):
             return
 
-        data=[]
+        data = []
         with self.open_connection() as con:
-            cursor=con.cursor()
-            cols=self.get_table_cols(tablename)
+            cursor = con.cursor()
+            cols = self.get_table_cols(tablename)
 
             cursor.execute(f"""
                 SELECT {",".join(cols)} FROM {tablename}
             """)
-            data=cursor.fetchall()
+            data = cursor.fetchall()
 
-        data_df=pd.DataFrame(data, columns = cols)
+        data_df = pd.DataFrame(data, columns=cols)
         return data_df
 
     def add_df_to_db(self, df, table: str = "", suppress: str = ""):
@@ -301,7 +301,7 @@ class MySQLManager(DBManager):
                 "There is no table available for CRUD operations."
             )
         else:
-            db_table=table if table else self.getconfig("table")
+            db_table = table if table else self.getconfig("table")
 
         if not self.does_table_exist(db_table):
             raise LookupError(
@@ -309,30 +309,30 @@ class MySQLManager(DBManager):
             )
 
         with self.open_connection() as con:
-            cursor=con.cursor()
+            cursor = con.cursor()
 
-            left_df=self.get_dbdata(table = db_table)
-            out_df=left_df.merge(df, how = "outer", indicator = "shared")
+            left_df = self.get_dbdata(table=db_table)
+            out_df = left_df.merge(df, how="outer", indicator="shared")
 
-            df_insert=out_df.loc[out_df.loc["shared"] == "right_only"].copy()
-            df_delete=out_df.loc[out_df.loc["shared"] == "left_only"].copy()
+            df_insert = out_df.loc[out_df.loc["shared"] == "right_only"].copy()
+            df_delete = out_df.loc[out_df.loc["shared"] == "left_only"].copy()
 
-            out_df=out_df.drop(columns = ["shared"])
-            df_insert=df_insert.drop(columns = ["shared"])
-            df_delete=df_insert.drop(columns = ["shared"])
+            out_df = out_df.drop(columns=["shared"])
+            df_insert = df_insert.drop(columns=["shared"])
+            df_delete = df_insert.drop(columns=["shared"])
 
             if len(out_df) == 0:
-                tkMessageBox.showinfo(title = "DataBase Update Complete",
-                                      message = "Nothing was added to the DB as no changes were detected between the different datasets.")
+                tkMessageBox.showinfo(title="DataBase Update Complete",
+                                      message="Nothing was added to the DB as no changes were detected between the different datasets.")
                 return
 
-            current_table=self.get_table(db_table, cols_as_dict = True)
-            table_cols=current_table["fields"]
-            table_pk=current_table["primary"]
+            current_table = self.get_table(db_table, cols_as_dict=True)
+            table_cols = current_table["fields"]
+            table_pk = current_table["primary"]
 
-            cols_insert="`,`".join([str(i)
+            cols_insert = "`,`".join([str(i)
                                       for i in df_insert.columns.tolist()])
-            sql_delete=f"""
+            sql_delete = f"""
                 DELETE FROM `{db_table}` WHERE {table_pk}=%s
             """
 
@@ -340,14 +340,14 @@ class MySQLManager(DBManager):
                 for _, row in df_insert.iterrows():
                     for index, value in row.iteritems():
                         if pd.isna(value) and table_cols[index].can_self_generate():
-                            row=row.drop(index = [index])
+                            row = row.drop(index=[index])
                             continue
                         if type(value) == np.int64:
-                            row.loc[index]=int(value)
+                            row.loc[index] = int(value)
 
-                    cols_insert="`,`".join([str(i)
+                    cols_insert = "`,`".join([str(i)
                                               for i in row.index.tolist()])
-                    sql_insert=f"""
+                    sql_insert = f"""
                         INSERT INTO `{db_table}` (`{cols_insert}`)
                         VALUES ({"%s," * (len(row.index)-1)}%s)
                     """
@@ -362,33 +362,30 @@ class MySQLManager(DBManager):
                 con.commit()
 
                 if (suppress == "success") or (suppress == "all"):
-                    tkMessageBox.showinfo(title = "Save Successful",
-                                          message = "Save Completed Successfully!")
+                    tkMessageBox.showinfo(title="Save Successful",
+                                          message="Save Completed Successfully!")
             except mysql.connector.ProgrammingError:
                 con.rollback()
 
                 if (suppress == "error") or (suppress == "all"):
-                    tkMessageBox.showinfo(title = "Save Failed",
-                                          message = "There was a problem with the supplied SQL statement.")
+                    tkMessageBox.showinfo(title="Save Failed",
+                                          message="There was a problem with the supplied SQL statement.")
             except Exception as err:
                 con.rollback()
 
                 if (suppress == "error") or (suppress == "all"):
-                    tkMessageBox.showinfo(title = "Save Successful",
-                                          message = err)
+                    tkMessageBox.showinfo(title="Save Successful",
+                                          message=err)
 
 
 class MongoManager(DBManager):
-    _config={
+    _config = {
         "host": "",
         "user": "",
         "passwd": "",
         "db": "",
         "codec_options": None
     }
-
-    def __init__(self, tables=None, **conf):
-        super().__init__(tables=tables, **conf)
 
     def open_connection(self):
         """Open a connection to the database using the data store in DBManager._config.
@@ -409,7 +406,7 @@ class MongoManager(DBManager):
                 "These required options are: `host`, `user`, `dbname`, `passwd`.")
 
         # try:
-        con=MongoClient(
+        con = MongoClient(
             f"mongodb+srv://{user}:{passwd}@{host}/{dbname}?retryWrites=true&w=majority")
         # except :
         #     tkMessageBox.showerror(title="Connection Failed",
