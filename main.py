@@ -75,7 +75,7 @@ def perform_operations():
 
     print("Welcome to DataVault Inc.")
 
-    while is_running:
+    while True:
         print("What would you like to do today?")
         for idx, func in enumerate(functions):
             print(f"[{idx}]: {prettify_func_name(func.__name__)}")
@@ -206,7 +206,6 @@ def update_product():
 
     db_datatracker = mongo.get_database()
     coll_top_products = db_datatracker["top_products"]
-    coll_products = db_datatracker["products"]
 
     res_update = coll_top_products.find_one_and_update(
         {}, {"$inc": {"totalSales": 250}, "$set": {"brand": "Shield"}})
